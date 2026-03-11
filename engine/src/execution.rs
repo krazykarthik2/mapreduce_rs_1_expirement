@@ -184,8 +184,8 @@ impl ExecutionEngine {
     }
 
     fn read_text_parallel(&self, path: &str) -> Vec<Record> {
-        let file =
-            File::open(path).unwrap_or_else(|e| panic!("Failed to open input file '{}': {}", path, e));
+        let file = File::open(path)
+            .unwrap_or_else(|e| panic!("Failed to open input file '{}': {}", path, e));
         let reader = BufReader::new(file);
         reader.lines().filter_map(|l| l.ok()).map(Record::Text).collect()
     }
