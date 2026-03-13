@@ -155,7 +155,7 @@ impl Dataset {
 
     /// Apply a named map function (lazy)
     fn map(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Dataset> {
-        let func_name = resolve_func_name(py, func, FunctionKind::Map)?;
+        let func_name = resolve_func_name_from_any(py, func, FunctionKind::Map)?;
         let (mut plan, inputs) = self.fork_plan();
         let id = plan.add_node(LogicalOp::Map { func_name }, inputs);
         Ok(Dataset::with_new_node(plan, id, self.partitions))
@@ -163,7 +163,7 @@ impl Dataset {
 
     /// Apply a named filter function (lazy)
     fn filter(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Dataset> {
-        let func_name = resolve_func_name(py, func, FunctionKind::Filter)?;
+        let func_name = resolve_func_name_from_any(py, func, FunctionKind::Filter)?;
         let (mut plan, inputs) = self.fork_plan();
         let id = plan.add_node(LogicalOp::Filter { func_name }, inputs);
         Ok(Dataset::with_new_node(plan, id, self.partitions))
@@ -171,7 +171,7 @@ impl Dataset {
 
     /// Apply a named flatmap function (lazy)
     fn flatmap(&self, py: Python<'_>, func: &Bound<'_, PyAny>) -> PyResult<Dataset> {
-        let func_name = resolve_func_name(py, func, FunctionKind::FlatMap)?;
+        let func_name = resolve_func_name_from_any(py, func, FunctionKind::FlatMap)?;
         let (mut plan, inputs) = self.fork_plan();
         let id = plan.add_node(LogicalOp::FlatMap { func_name }, inputs);
         Ok(Dataset::with_new_node(plan, id, self.partitions))
@@ -185,7 +185,7 @@ impl Dataset {
         func: &Bound<'_, PyAny>,
         partitions: Option<usize>,
     ) -> PyResult<Dataset> {
-        let func_name = resolve_func_name(py, func, FunctionKind::Reduce)?;
+        let func_name = resolve_func_name_from_any(py, func, FunctionKind::Reduce)?;
         let (mut plan, inputs) = self.fork_plan();
         let parts = partitions.unwrap_or(self.partitions);
         let id = plan.add_node(
@@ -251,14 +251,6 @@ fn record_to_string(r: Record) -> String {
     }
 }
 
-fn resolve_func_name(
-    py: Python<'_>,
-    func: &Bound<'_, PyAny>,
-    expected_kind: FunctionKind,
-) -> PyResult<String> {
-    resolve_func_name_from_any(py, func, expected_kind)
-}
-
 fn resolve_func_name_from_any(
     py: Python<'_>,
     func: &Bound<'_, PyAny>,
@@ -277,7 +269,7 @@ fn resolve_func_name_from_any(
     }
 
     Err(PyTypeError::new_err(format!(
-        "Expected function name string, FunctionRef, or lambda returning FunctionRef for {}",
+        "Expected function name string, FunctionRef, or lambda(expr) returning FunctionRef for {}",
         expected_kind.as_str()
     )))
 }
@@ -288,16 +280,7 @@ fn resolve_from_callable(
     expected_kind: FunctionKind,
 ) -> PyResult<String> {
     let expr_arg = Py::new(py, ExprArg::default())?;
-    let value = match func.call1((expr_arg.clone_ref(py),)) {
-        Ok(v) => v,
-        Err(err) => {
-            if err.is_instance_of::<PyTypeError>(py) {
-                func.call0()?
-            } else {
-                return Err(err);
-            }
-        }
-    };
+    let value = func.call1((expr_arg.clone_ref(py),))?;
     resolve_func_name_from_any(py, &value, expected_kind)
 }
 
@@ -377,11 +360,19 @@ fn register_dynamic_function(func_name: &str, registry: &mut JobRegistry) -> PyR
                 let updated = match record {
                     Record::Text(text) => match text.parse::<i64>() {
                         Ok(value) => Record::Text((value + amount).to_string()),
-                        Err(_) => Record::Text(text),
+                        Err(_) => {
+                            log::debug!("add({amount}) skipped non-numeric text record: {text}");
+                            Record::Text(text)
+                        }
                     },
                     Record::KeyValue(key, value_text) => match value_text.parse::<i64>() {
                         Ok(value) => Record::KeyValue(key, (value + amount).to_string()),
-                        Err(_) => Record::KeyValue(key, value_text),
+                        Err(_) => {
+                            log::debug!(
+                                "add({amount}) skipped non-numeric key/value record - key: {key}, value: {value_text}"
+                            );
+                            Record::KeyValue(key, value_text)
+                        }
                     },
                     Record::KeyValues(key, values) => Record::KeyValues(key, values),
                 };
